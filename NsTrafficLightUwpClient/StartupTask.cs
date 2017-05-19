@@ -11,14 +11,20 @@ namespace NsTrafficLightUwpClient
 {
     public sealed class StartupTask : IBackgroundTask
     {
-        BackgroundTaskDeferral deferral;
-        private readonly HttpClient httpClient = new HttpClient();
-        private readonly Dictionary<string, GpioPin> pins = new Dictionary<string, GpioPin>();
+        BackgroundTaskDeferral _deferral;
+        private readonly HttpClient _httpClient = new HttpClient();
+        private readonly Dictionary<TrafficLightState, GpioPin> _gpioLightPins = new Dictionary<TrafficLightState, GpioPin>();
+
+        private GpioPin _gpioButtonPin;
+        private bool _isDead;
+
+        private IDisposable _signalRHub;
+        private HubConnection _signalRConnection;
 
         public async void Run(IBackgroundTaskInstance taskInstance)
         {
             // Tells that the program will not exit at the end of the Run method
-            deferral = taskInstance.GetDeferral();
+            _deferral = taskInstance.GetDeferral();
 
             // Opens Gpio ports and initializes pins dictionary
             InitGpio();
@@ -41,15 +47,42 @@ namespace NsTrafficLightUwpClient
         private void InitGpio()
         {
             var pinController = GpioController.GetDefault();
-            pins.Add("Green", CreateAndOpenPin(pinController, 27));
-            pins.Add("Orange", CreateAndOpenPin(pinController, 18));
-            pins.Add("Red", CreateAndOpenPin(pinController, 4));
+            _gpioLightPins.Add(TrafficLightState.Green, CreateAndOpenPin(pinController, 27));
+            _gpioLightPins.Add(TrafficLightState.Orange, CreateAndOpenPin(pinController, 18));
+            _gpioLightPins.Add(TrafficLightState.Red, CreateAndOpenPin(pinController, 4));
+
+            _gpioButtonPin = CreateAndOpenPin(pinController, 23, GpioPinDriveMode.InputPullUp);
+            _gpioButtonPin.DebounceTimeout = TimeSpan.FromMilliseconds(50);
+            _gpioButtonPin.ValueChanged += ButtonPressed;
         }
 
-        private GpioPin CreateAndOpenPin(GpioController controller, int pinNumber)
+        private void ButtonPressed(GpioPin sender, GpioPinValueChangedEventArgs args)
+        {
+            if (args.Edge != GpioPinEdge.FallingEdge)
+            {
+                return;
+            }
+
+            _isDead = !_isDead;
+
+            if (_isDead)
+            {
+                LightBulb(TrafficLightState.Broken);
+                _signalRConnection.Stop();
+                _signalRHub.Dispose();
+                NotifyState(TrafficLightState.Broken).Wait();
+            }
+            else
+            {
+                NotifyState(TrafficLightState.Green).Wait();
+                StartSignalR().Wait();
+            }
+        }
+
+        private GpioPin CreateAndOpenPin(GpioController controller, int pinNumber, GpioPinDriveMode driveMode = GpioPinDriveMode.Output)
         {
             var gpioPin = controller.OpenPin(pinNumber);
-            gpioPin.SetDriveMode(GpioPinDriveMode.Output);
+            gpioPin.SetDriveMode(driveMode);
 
             return gpioPin;
         }
@@ -58,44 +91,50 @@ namespace NsTrafficLightUwpClient
         {
             await PollApi();
 
-            var connection = new HubConnection(Configuration.Instance.ApiUri.AbsoluteUri);
-            var hub = connection.CreateHubProxy("TrafficLightHub");
+            _signalRConnection = new HubConnection(Configuration.Instance.ApiUri.AbsoluteUri);
+            var hub = _signalRConnection.CreateHubProxy("TrafficLightHub");
 
-            connection.EnsureReconnecting();
+            _signalRConnection.EnsureReconnecting();
 
-            await connection.Start().ContinueWith(task =>
+            await _signalRConnection.Start().ContinueWith(task =>
             {
                 if (task.IsFaulted)
                 {
-                    LightBulbs(new[] { "Orange", "Red" });
+                    LightBulbs(new[] { TrafficLightState.Orange, TrafficLightState.Red });
                 }
             });
 
-            hub.On<TrafficLightState>("UpdateLight", s => LightBulb(s.ToString()));
+            _signalRHub = hub.On<TrafficLightState>("UpdateLight", s => LightBulb(s));
         }
 
         private async Task Startup()
         {
-            foreach (var color in pins.Keys)
+            foreach (var color in _gpioLightPins.Keys)
             {
                 LightBulb(color);
                 await Task.Delay(1000);
             }
 
-            LightBulb("Off");
+            LightBulb(TrafficLightState.Off);
         }
 
-        private void LightBulb(string lightValue)
+        private void LightBulb(TrafficLightState lightValue)
         {
-            foreach (var pair in this.pins)
+            if (lightValue == TrafficLightState.Broken)
+            {
+                LightBulbs(new[] { TrafficLightState.Red, TrafficLightState.Green });
+                return;
+            }
+
+            foreach (var pair in this._gpioLightPins)
             {
                 pair.Value.Write(pair.Key == lightValue ? GpioPinValue.High : GpioPinValue.Low);
             }
         }
 
-        private void LightBulbs(ICollection<string> lightValues)
+        private void LightBulbs(ICollection<TrafficLightState> lightValues)
         {
-            foreach(var pair in this.pins)
+            foreach (var pair in this._gpioLightPins)
             {
                 pair.Value.Write(lightValues.Contains(pair.Key) ? GpioPinValue.High : GpioPinValue.Low);
             }
@@ -104,16 +143,26 @@ namespace NsTrafficLightUwpClient
         private async Task PollApi()
         {
             var uri = new Uri(Configuration.Instance.ApiUri, "api/trafficlight");
-            var getResult = await httpClient.GetAsync(uri);
+            var getResult = await _httpClient.GetAsync(uri);
             if (getResult.IsSuccessStatusCode)
             {
-                var lightValue = (await getResult.Content.ReadAsStringAsync()).Replace("\"", string.Empty);
-                LightBulb(lightValue);
+                var response = (await getResult.Content.ReadAsStringAsync()).Replace("\"", string.Empty);
+                TrafficLightState lightValue;
+                if (Enum.TryParse(response, out lightValue))
+                {
+                    LightBulb(lightValue);
+                    return;
+                }
             }
-            else
-            {
-                LightBulbs(new[] { "Orange", "Red" });
-            }
+
+            // We get here if a problem occured, so let's light the error bulbs
+            LightBulbs(new[] { TrafficLightState.Orange, TrafficLightState.Red });
+        }
+
+        private Task NotifyState(TrafficLightState state)
+        {
+            var uri = new Uri(Configuration.Instance.ApiUri, $"api/trafficlight/{state.ToString().ToLower()}");
+            return _httpClient.PutAsync(uri, null);
         }
 
         private void Timer_Tick(ThreadPoolTimer timer)
@@ -123,8 +172,8 @@ namespace NsTrafficLightUwpClient
 
         private void Timer_Destroyed(ThreadPoolTimer timer)
         {
-            deferral.Complete();
-            httpClient.Dispose();
+            _deferral.Complete();
+            _httpClient.Dispose();
         }
     }
 }

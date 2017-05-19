@@ -20,6 +20,10 @@
         /// <summary>
         /// The red light is on
         /// </summary>
-        Red
+        Red,
+        /// <summary>
+        /// The light is broken
+        /// </summary>        
+        Broken
     }
 }
