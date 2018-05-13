@@ -9,25 +9,9 @@ namespace NsTrafficLightUwpClient
     /// </summary>
     public sealed class Configuration
     {
-        /// <summary>
-        /// Gets or sets the url of the Api
-        /// </summary>
-        public string ApiUrl { get; set; }
+        public bool UseTpm { get; set; }
 
-        /// <summary>
-        /// Gets or sets the uri of the Api
-        /// </summary>
-        public Uri  ApiUri { get; set; }
-
-        /// <summary>
-        /// Gets or sets a value indicating if SignalR should be used or not
-        /// </summary>
-        public bool UseSignalR { get; set; }
-
-        /// <summary>
-        /// Gets or sets the period to wait between each Api call if the polling mode is on (UseSignalR = false)
-        /// </summary>
-        public int ApiPollingPeriodInMs { get; set; }
+        public string ConnectionString { get; set; }
 
         /// <summary>
         /// Gets the current instance
@@ -43,10 +27,7 @@ namespace NsTrafficLightUwpClient
             var sampleFile = await packageFolder.GetFileAsync("configuration.json");
             var content = await Windows.Storage.FileIO.ReadTextAsync(sampleFile);
 
-            var configuration = JsonConvert.DeserializeObject<Configuration>(content);
-            configuration.ApiUri = new Uri(configuration.ApiUrl);
-
-            return configuration;
+            return JsonConvert.DeserializeObject<Configuration>(content);
         }
     }
 }

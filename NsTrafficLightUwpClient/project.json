@@ -1,10 +1,10 @@
 ﻿{
   "dependencies": {
-    "Microsoft.AspNet.SignalR.Client": "2.2.1",
-    "Microsoft.NETCore.UniversalWindowsPlatform": "5.0.0"
+    "Microsoft.AspNet.SignalR.Client": "2.2.3",
+    "Microsoft.NETCore.UniversalWindowsPlatform": "6.0.8"
   },
   "frameworks": {
-    "uap10.0": {}
+    "UAP,Version=v10.0.10586": {}
   },
   "runtimes": {
     "win10-arm": {},
