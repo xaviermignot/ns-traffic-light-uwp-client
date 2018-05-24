@@ -6,6 +6,7 @@ using Microsoft.Azure.Devices.Shared;
 using Microsoft.Devices.Tpm;
 using Windows.ApplicationModel.Background;
 using Windows.Devices.Gpio;
+using Windows.System.Threading;
 
 namespace NsTrafficLightUwpClient
 {
@@ -22,6 +23,8 @@ namespace NsTrafficLightUwpClient
 
         private const string LightProperty = "Light";
 
+        private ThreadPoolTimer _alertTimer;
+
         public async void Run(IBackgroundTaskInstance taskInstance)
         {
             // Tells that the program will not exit at the end of the Run method
@@ -35,6 +38,11 @@ namespace NsTrafficLightUwpClient
 
             await InitializeDeviceClient();
 
+            await GetAndApplyDeviceTwins();
+        }
+
+        private async Task GetAndApplyDeviceTwins()
+        {
             var twin = await Client.GetTwinAsync();
             if (!LightBulbFromTwins(twin.Properties.Desired))
             {
@@ -48,6 +56,7 @@ namespace NsTrafficLightUwpClient
             var cnxString = GetIotHubConnectionString();
             Client = DeviceClient.CreateFromConnectionString(cnxString, TransportType.Mqtt);
             await Client.SetDesiredPropertyUpdateCallbackAsync(OnDesiredPropertyChanged, null);
+            await Client.SetMethodHandlerAsync("Alert", StartAlert, null);
         }
 
         private static string GetIotHubConnectionString()
@@ -98,6 +107,17 @@ namespace NsTrafficLightUwpClient
             return Task.CompletedTask;
         }
 
+        private Task<MethodResponse> StartAlert(MethodRequest request, object userContext)
+        {
+            this._alertTimer = ThreadPoolTimer.CreatePeriodicTimer(AlertTimerTick, TimeSpan.FromMilliseconds(500));
+            return Task.FromResult(new MethodResponse(200));
+        }
+
+        private void AlertTimerTick(ThreadPoolTimer timer)
+        {
+            LightBulb(this._currentState == TrafficLightState.Orange ? TrafficLightState.Red : TrafficLightState.Orange);
+        }
+
         private void InitGpio()
         {
             var pinController = GpioController.GetDefault();
@@ -114,6 +134,14 @@ namespace NsTrafficLightUwpClient
         {
             if (args.Edge != GpioPinEdge.FallingEdge)
             {
+                return;
+            }
+
+            if (this._alertTimer != null && this._alertTimer.Delay != TimeSpan.Zero)
+            {
+                this._alertTimer.Cancel();
+                GetAndApplyDeviceTwins().Wait();
+
                 return;
             }
 
